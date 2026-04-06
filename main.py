@@ -18,7 +18,7 @@ origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5173').split(',')
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_methods=['GET', 'POST'],
+    allow_methods=['GET', 'POST', 'PUT'],
     allow_headers=['*'],
 )
 
@@ -80,3 +80,42 @@ def login(data: LoginData):
         raise HTTPException(status_code=401, detail='Неверный логин или пароль')
 
     return {'ok': True, 'user_id': user[0], 'name': user[1]}
+
+
+class UpdateAccountData(BaseModel):
+    user_id: int
+    current_password: str
+    new_username: str | None = None
+    new_password: str | None = None
+
+@app.put('/api/auth/me')
+def update_account(data: UpdateAccountData):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        'SELECT id FROM users WHERE id = %s AND password_hash = %s',
+        (data.user_id, hash_password(data.current_password))
+    )
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=401, detail='Неверный пароль')
+
+    updates = []
+    params = []
+    if data.new_username:
+        updates.append('username = %s')
+        params.append(data.new_username)
+    if data.new_password:
+        updates.append('password_hash = %s')
+        params.append(hash_password(data.new_password))
+
+    if updates:
+        params.append(data.user_id)
+        cursor.execute(f'UPDATE users SET {", ".join(updates)} WHERE id = %s', params)
+        conn.commit()
+
+    cursor.execute('SELECT id, username FROM users WHERE id = %s', (data.user_id,))
+    updated = cursor.fetchone()
+    conn.close()
+    return {'ok': True, 'user_id': updated[0], 'name': updated[1]}
