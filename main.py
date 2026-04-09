@@ -49,15 +49,18 @@ def get_poll_candidates(n: int = 12):
         SELECT
             b.id,
             b.title,
-            b.author_id,
             b.added_at,
+            a.name                                AS author_name,
+            COALESCE(m.telegram_username, m.telegram_fullname) AS member_display_name,
             COUNT(pv.id)                          AS appearances_count,
             MAX(p.date)                           AS last_poll_date
         FROM books b
+        LEFT JOIN authors a     ON a.id = b.author_id
+        LEFT JOIN members m     ON m.id = b.added_by_member_id
         LEFT JOIN poll_votes pv ON pv.book_id = b.id
         LEFT JOIN polls p       ON p.id = pv.poll_id
-        WHERE b.status = 'to_read'
-        GROUP BY b.id
+        WHERE b.status = \'to_read\'
+        GROUP BY b.id, a.name, m.telegram_username, m.telegram_fullname
     ''')
     columns = [desc[0] for desc in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -99,7 +102,15 @@ def get_poll_candidates(n: int = 12):
                 pool.pop(i)
                 break
 
-    return selected
+    return [
+        {
+            "id": b["id"],
+            "title": b["title"],
+            "author_name": b["author_name"],
+            "member_display_name": b["member_display_name"],
+        }
+        for b in selected
+    ]
 
 app.include_router(bot_router)
 
