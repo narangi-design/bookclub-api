@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -13,6 +13,11 @@ from auth import hash_password, create_access_token, get_current_user
 load_dotenv()
 
 app = FastAPI()
+
+
+def verify_bot_secret(x_bot_secret: str = Header()):
+    if x_bot_secret != os.getenv('BOT_SECRET'):
+        raise HTTPException(status_code=403, detail='Forbidden')
 
 origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5173').split(',')
 
@@ -30,7 +35,12 @@ app.add_middleware(
 def get_books():
     return get_data('books')
 
-@app.get('/api/poll-candidates')
+
+# --- Bot endpoints (все защищены verify_bot_secret) ---
+
+bot_router = APIRouter(prefix='/api/bot', dependencies=[Depends(verify_bot_secret)])
+
+@bot_router.get('/poll-candidates')
 def get_poll_candidates(n: int = 12):
     conn = get_connection()
     cursor = conn.cursor()
@@ -90,6 +100,9 @@ def get_poll_candidates(n: int = 12):
                 break
 
     return selected
+
+app.include_router(bot_router)
+
 
 @app.get('/api/authors')
 def get_authors():
