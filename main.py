@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header
 from mangum import Mangum
+from rapidfuzz import process, fuzz
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -112,6 +113,56 @@ def get_poll_candidates(n: int = 12):
         }
         for b in selected
     ]
+
+class BotAddBookData(BaseModel):
+    title: str
+    author_name: str
+    telegram_id: int
+
+@bot_router.post('/books')
+def bot_add_book(data: BotAddBookData):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id, name FROM authors')
+    all_authors = cursor.fetchall()
+    author_id = None
+    if all_authors:
+        names = [a[1] for a in all_authors]
+        match = process.extractOne(data.author_name, names, scorer=fuzz.token_sort_ratio, score_cutoff=90)
+        if match:
+            author_id = all_authors[match[2]][0]
+    if author_id is None:
+        cursor.execute('INSERT INTO authors (name) VALUES (%s) RETURNING id', (data.author_name,))
+        author_id = cursor.fetchone()[0]
+
+    cursor.execute('SELECT id FROM members WHERE telegram_id = %s', (data.telegram_id,))
+    member_row = cursor.fetchone()
+    member_id = member_row[0] if member_row else None
+
+    cursor.execute(
+        "INSERT INTO books (title, author_id, added_by_member_id, added_at, status) VALUES (%s, %s, %s, CURRENT_DATE, 'to_read') RETURNING id",
+        (data.title, author_id, member_id),
+    )
+    book_id = cursor.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return {'ok': True, 'book_id': book_id}
+
+
+@bot_router.delete('/books')
+def bot_remove_book(title: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE books SET status = 'removed' WHERE lower(title) = lower(%s) AND status != 'removed' RETURNING id",
+        (title,),
+    )
+    found = cursor.fetchone() is not None
+    conn.commit()
+    conn.close()
+    return {'found': found}
+
 
 app.include_router(bot_router)
 
