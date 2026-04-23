@@ -17,6 +17,11 @@ load_dotenv()
 app = FastAPI()
 
 
+def fuzzy_find(query: str, choices: list[str], threshold: int = 90) -> str | None:
+    result = process.extractOne(query, choices, scorer=fuzz.token_sort_ratio, score_cutoff=threshold)
+    return result[0] if result else None
+
+
 def verify_bot_secret(x_bot_secret: str = Header()):
     if x_bot_secret != os.getenv('BOT_SECRET'):
         raise HTTPException(status_code=403, detail='Forbidden')
@@ -118,27 +123,44 @@ class BotAddBookData(BaseModel):
     title: str
     author_name: str
     telegram_id: int
+    telegram_username: str | None = None
+    telegram_fullname: str | None = None
 
 @bot_router.post('/books')
 def bot_add_book(data: BotAddBookData):
     conn = get_connection()
     cursor = conn.cursor()
 
+    cursor.execute('SELECT title FROM books WHERE status != \'removed\'')
+    all_titles = [row[0] for row in cursor.fetchall()]
+    if all_titles:
+        title_match = fuzzy_find(data.title, all_titles)
+        if title_match:
+            conn.close()
+            return {'exists': True, 'existing_title': title_match}
+
     cursor.execute('SELECT id, name FROM authors')
     all_authors = cursor.fetchall()
     author_id = None
     if all_authors:
         names = [a[1] for a in all_authors]
-        match = process.extractOne(data.author_name, names, scorer=fuzz.token_sort_ratio, score_cutoff=90)
-        if match:
-            author_id = all_authors[match[2]][0]
+        matched_name = fuzzy_find(data.author_name, names)
+        if matched_name:
+            author_id = next(a[0] for a in all_authors if a[1] == matched_name)
     if author_id is None:
         cursor.execute('INSERT INTO authors (name) VALUES (%s) RETURNING id', (data.author_name,))
         author_id = cursor.fetchone()[0]
 
     cursor.execute('SELECT id FROM members WHERE telegram_id = %s', (data.telegram_id,))
     member_row = cursor.fetchone()
-    member_id = member_row[0] if member_row else None
+    if member_row:
+        member_id = member_row[0]
+    else:
+        cursor.execute(
+            'INSERT INTO members (telegram_id, telegram_username, telegram_fullname) VALUES (%s, %s, %s) RETURNING id',
+            (data.telegram_id, data.telegram_username, data.telegram_fullname),
+        )
+        member_id = cursor.fetchone()[0]
 
     cursor.execute(
         "INSERT INTO books (title, author_id, added_by_member_id, added_at, status) VALUES (%s, %s, %s, CURRENT_DATE, 'to_read') RETURNING id",
@@ -148,6 +170,88 @@ def bot_add_book(data: BotAddBookData):
     conn.commit()
     conn.close()
     return {'ok': True, 'book_id': book_id}
+
+
+class BotCreatePollData(BaseModel):
+    stage: int
+    date: str
+    telegram_poll_id: str
+    book_ids: list[int]
+
+@bot_router.post('/polls')
+def bot_create_poll(data: BotCreatePollData):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO polls (stage, date, telegram_poll_id) VALUES (%s, %s, %s) RETURNING id',
+        (data.stage, data.date, data.telegram_poll_id),
+    )
+    poll_id = cursor.fetchone()[0]
+    for i, book_id in enumerate(data.book_ids):
+        cursor.execute(
+            'INSERT INTO poll_book_options (poll_id, option_index, book_id) VALUES (%s, %s, %s)',
+            (poll_id, i, book_id),
+        )
+    conn.commit()
+    conn.close()
+    return {'ok': True, 'poll_id': poll_id}
+
+
+class PollOptionResult(BaseModel):
+    option_index: int
+    votes_count: int
+
+class BotSavePollResultsData(BaseModel):
+    telegram_poll_id: str
+    total_voters: int
+    options: list[PollOptionResult]
+
+@bot_router.post('/polls/results')
+def bot_save_poll_results(data: BotSavePollResultsData):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id FROM polls WHERE telegram_poll_id = %s', (data.telegram_poll_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail='Poll not found')
+    poll_id = row[0]
+
+    cursor.execute('UPDATE polls SET total_voters = %s WHERE id = %s', (data.total_voters, poll_id))
+
+    cursor.execute(
+        'SELECT option_index, book_id FROM poll_book_options WHERE poll_id = %s',
+        (poll_id,),
+    )
+    option_to_book = {r[0]: r[1] for r in cursor.fetchall()}
+
+    winner_book_id = None
+    winner_votes = -1
+    for opt in data.options:
+        book_id = option_to_book.get(opt.option_index)
+        if book_id is None:
+            continue
+        cursor.execute(
+            'INSERT INTO poll_votes (poll_id, book_id, votes_count) VALUES (%s, %s, %s)',
+            (poll_id, book_id, opt.votes_count),
+        )
+        if opt.votes_count > winner_votes:
+            winner_votes = opt.votes_count
+            winner_book_id = book_id
+
+    if winner_book_id:
+        cursor.execute('SELECT date FROM polls WHERE id = %s', (poll_id,))
+        poll_date = cursor.fetchone()[0]
+        cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, poll_id))
+        cursor.execute(
+            "UPDATE books SET status = 'read', elected_poll_id = %s, elected_at = %s WHERE id = %s",
+            (poll_id, poll_date, winner_book_id),
+        )
+
+    conn.commit()
+    conn.close()
+    return {'ok': True, 'winner_book_id': winner_book_id}
 
 
 @bot_router.delete('/books')
