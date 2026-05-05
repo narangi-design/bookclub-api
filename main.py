@@ -369,6 +369,10 @@ def get_poll_votes():
 def get_award_votes():
     return get_data('award_votes')
 
+@app.get('/api/award-events')
+def get_award_events():
+    return get_data('award_events')
+
 
 # --- Protected endpoints ---
 
