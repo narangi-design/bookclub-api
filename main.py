@@ -295,6 +295,7 @@ def bot_save_poll_results(data: BotSavePollResultsData):
                 winner_votes = opt.votes_count
                 winner_book_id = book_id
 
+        winner_info = None
         if winner_book_id:
             cursor.execute('SELECT date FROM polls WHERE id = %s', (poll_id,))
             poll_date = cursor.fetchone()[0]
@@ -303,9 +304,24 @@ def bot_save_poll_results(data: BotSavePollResultsData):
                 "UPDATE books SET status = 'read', elected_poll_id = %s, elected_at = %s WHERE id = %s",
                 (poll_id, poll_date, winner_book_id),
             )
+            cursor.execute('''
+                SELECT b.title, a.name, m.telegram_username
+                FROM books b
+                LEFT JOIN authors a ON a.id = b.author_id
+                LEFT JOIN members m ON m.id = b.added_by_member_id
+                WHERE b.id = %s
+            ''', (winner_book_id,))
+            row = cursor.fetchone()
+            winner_info = {
+                'book_id': winner_book_id,
+                'title': row[0],
+                'author': row[1],
+                'added_by_username': row[2],
+                'votes': winner_votes,
+            }
 
         conn.commit()
-        return {'ok': True, 'winner_book_id': winner_book_id}
+        return {'ok': True, 'winner': winner_info, 'total_voters': data.total_voters}
     except HTTPException:
         raise
     except Exception:
