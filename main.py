@@ -23,6 +23,18 @@ POLL_RECENCY_BOOST = 90
 app = FastAPI()
 
 
+def resolve_member_id(cursor, telegram_id: int, telegram_username: str | None) -> int | None:
+    """Look up member by telegram_id, fall back to telegram_username, backfill id if found via username."""
+    cursor.execute('SELECT id FROM members WHERE telegram_id = %s', (telegram_id,))
+    row = cursor.fetchone()
+    if not row and telegram_username:
+        cursor.execute('SELECT id FROM members WHERE telegram_username = %s', (telegram_username,))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute('UPDATE members SET telegram_id = %s WHERE id = %s', (telegram_id, row[0]))
+    return row[0] if row else None
+
+
 def verify_bot_secret(x_bot_secret: str | None = Header(default=None)):
     secret = os.getenv('BOT_SECRET', '')
     if not x_bot_secret or not hmac.compare_digest(x_bot_secret, secret):
@@ -170,19 +182,8 @@ def bot_add_book(data: BotAddBookData):
             author_id = cursor.fetchone()[0]
 
         # Step 3: find or create member
-        cursor.execute('SELECT id FROM members WHERE telegram_id = %s', (data.telegram_id,))
-        member_row = cursor.fetchone()
-        if not member_row and data.telegram_username:
-            cursor.execute('SELECT id FROM members WHERE telegram_username = %s', (data.telegram_username,))
-            member_row = cursor.fetchone()
-            if member_row:
-                cursor.execute(
-                    'UPDATE members SET telegram_id = %s WHERE id = %s',
-                    (data.telegram_id, member_row[0]),
-                )
-        if member_row:
-            member_id = member_row[0]
-        else:
+        member_id = resolve_member_id(cursor, data.telegram_id, data.telegram_username)
+        if member_id is None:
             cursor.execute(
                 'INSERT INTO members (telegram_id, telegram_username, telegram_fullname) VALUES (%s, %s, %s) RETURNING id',
                 (data.telegram_id, data.telegram_username, data.telegram_fullname),
@@ -314,18 +315,20 @@ def bot_save_poll_results(data: BotSavePollResultsData):
 
 
 @bot_router.get('/members/{telegram_id}/books')
-def bot_get_member_books(telegram_id: int):
+def bot_get_member_books(telegram_id: int, telegram_username: str | None = None):
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        member_id = resolve_member_id(cursor, telegram_id, telegram_username)
+        if member_id is None:
+            return []
         cursor.execute('''
             SELECT b.id, b.title, a.name
             FROM books b
             LEFT JOIN authors a ON a.id = b.author_id
-            JOIN members m ON m.id = b.added_by_member_id
-            WHERE m.telegram_id = %s AND b.status = \'to_read\'
+            WHERE b.added_by_member_id = %s AND b.status = \'to_read\'
             ORDER BY b.added_at DESC
-        ''', (telegram_id,))
+        ''', (member_id,))
         rows = cursor.fetchall()
     finally:
         conn.close()
