@@ -313,6 +313,25 @@ def bot_save_poll_results(data: BotSavePollResultsData):
         conn.close()
 
 
+@bot_router.get('/members/{telegram_id}/books')
+def bot_get_member_books(telegram_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT b.id, b.title, a.name
+            FROM books b
+            LEFT JOIN authors a ON a.id = b.author_id
+            JOIN members m ON m.id = b.added_by_member_id
+            WHERE m.telegram_id = %s AND b.status = \'to_read\'
+            ORDER BY b.added_at DESC
+        ''', (telegram_id,))
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+    return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
+
+
 @bot_router.get('/books/search')
 def bot_search_books(q: str):
     conn = get_connection()
