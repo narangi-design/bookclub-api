@@ -1,6 +1,5 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header
 from mangum import Mangum
-from rapidfuzz import process, fuzz
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -12,14 +11,9 @@ from datetime import date
 
 from db import get_connection, get_data
 from auth import hash_password, create_access_token, get_current_user
+from matching import find_match, fuzzy_find, TITLE_MATCH_THRESHOLD, AUTHOR_MATCH_THRESHOLD
 
 load_dotenv()
-
-# Fuzzy match threshold for book titles (token_sort_ratio)
-TITLE_MATCH_THRESHOLD = 90
-
-# Fuzzy match threshold for author names — raised after Serkin/Sorokin false positive (~90%)
-AUTHOR_MATCH_THRESHOLD = 93
 
 # Added to days_since_poll so books that have never appeared in a poll
 # still get a meaningful weight (otherwise days_since_poll = 0 collapses their chance)
@@ -27,18 +21,6 @@ POLL_RECENCY_BOOST = 90
 
 
 app = FastAPI()
-
-
-def fuzzy_find(query: str, choices: list[str], threshold: int = TITLE_MATCH_THRESHOLD) -> str | None:
-    result = process.extractOne(query, choices, scorer=fuzz.token_sort_ratio, score_cutoff=threshold)
-    return result[0] if result else None
-
-
-def find_match(query: str, choices: list[str], threshold: int = TITLE_MATCH_THRESHOLD) -> str | None:
-    """Exact match (case-insensitive) first, then fuzzy."""
-    lower = query.lower()
-    exact = next((c for c in choices if c.lower() == lower), None)
-    return exact if exact else fuzzy_find(query, choices, threshold)
 
 
 def verify_bot_secret(x_bot_secret: str | None = Header(default=None)):
@@ -331,14 +313,40 @@ def bot_save_poll_results(data: BotSavePollResultsData):
         conn.close()
 
 
-@bot_router.delete('/books')
-def bot_remove_book(title: str):
+@bot_router.get('/books/search')
+def bot_search_books(q: str):
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "UPDATE books SET status = 'removed' WHERE lower(title) = lower(%s) AND status != 'removed' RETURNING id",
-            (title,),
+            "SELECT b.id, b.title, a.name FROM books b LEFT JOIN authors a ON a.id = b.author_id WHERE b.status = 'to_read'"
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    titles = [r[1] for r in rows]
+    matched_title = find_match(q, titles)
+    if not matched_title:
+        return []
+
+    # Return all rows whose title fuzzy-matches the query
+    from rapidfuzz import fuzz
+    results = []
+    for book_id, title, author in rows:
+        if fuzz.token_sort_ratio(q.lower(), title.lower()) >= TITLE_MATCH_THRESHOLD:
+            results.append({'id': book_id, 'title': title, 'author': author})
+    return results
+
+
+@bot_router.delete('/books/{book_id}')
+def bot_remove_book(book_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE books SET status = 'removed' WHERE id = %s AND status = 'to_read' RETURNING id",
+            (book_id,),
         )
         found = cursor.fetchone() is not None
         conn.commit()
