@@ -161,7 +161,7 @@ def bot_add_book(data: BotAddBookData):
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # Step 1: check for duplicate title
+        # Step 1: check for duplicate title among active books
         cursor.execute("SELECT title FROM books WHERE status != 'removed'")
         all_titles = [row[0] for row in cursor.fetchall()]
         if all_titles:
@@ -190,12 +190,22 @@ def bot_add_book(data: BotAddBookData):
             )
             member_id = cursor.fetchone()[0]
 
-        # Step 4: insert book
-        cursor.execute(
-            "INSERT INTO books (title, author_id, added_by_member_id, added_at, status) VALUES (%s, %s, %s, CURRENT_DATE, 'to_read') RETURNING id",
-            (data.title, author_id, member_id),
-        )
-        book_id = cursor.fetchone()[0]
+        # Step 4: restore removed book or insert new one
+        cursor.execute("SELECT id, title FROM books WHERE status = 'removed'")
+        removed_titles = cursor.fetchall()
+        removed_match = find_match(data.title, [r[1] for r in removed_titles]) if removed_titles else None
+        if removed_match:
+            book_id = next(r[0] for r in removed_titles if r[1] == removed_match)
+            cursor.execute(
+                "UPDATE books SET status = 'to_read', added_by_member_id = %s, added_at = CURRENT_DATE, author_id = %s WHERE id = %s",
+                (member_id, author_id, book_id),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO books (title, author_id, added_by_member_id, added_at, status) VALUES (%s, %s, %s, CURRENT_DATE, 'to_read') RETURNING id",
+                (data.title, author_id, member_id),
+            )
+            book_id = cursor.fetchone()[0]
 
         conn.commit()
         return {'ok': True, 'book_id': book_id}
@@ -330,6 +340,7 @@ def bot_get_member_books(telegram_id: int, telegram_username: str | None = None)
             ORDER BY b.added_at DESC
         ''', (member_id,))
         rows = cursor.fetchall()
+        conn.commit()
     finally:
         conn.close()
     return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
