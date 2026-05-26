@@ -1,5 +1,10 @@
 from rapidfuzz import process, fuzz
 
+
+def dedup_book_ids(book_ids: list[int]) -> list[int]:
+    """Remove duplicate book ids preserving original order."""
+    return list(dict.fromkeys(book_ids))
+
 TITLE_MATCH_THRESHOLD = 90
 AUTHOR_MATCH_THRESHOLD = 93
 

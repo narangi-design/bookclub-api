@@ -11,7 +11,7 @@ from datetime import date
 
 from db import get_connection, get_data
 from auth import hash_password, create_access_token, get_current_user
-from matching import find_match, fuzzy_find, TITLE_MATCH_THRESHOLD, AUTHOR_MATCH_THRESHOLD
+from matching import find_match, fuzzy_find, dedup_book_ids, TITLE_MATCH_THRESHOLD, AUTHOR_MATCH_THRESHOLD
 
 load_dotenv()
 
@@ -232,7 +232,8 @@ def bot_create_poll(data: BotCreatePollData):
             (data.stage, data.date, data.telegram_poll_id),
         )
         poll_id = cursor.fetchone()[0]
-        for i, book_id in enumerate(data.book_ids):
+        unique_book_ids = dedup_book_ids(data.book_ids)
+        for i, book_id in enumerate(unique_book_ids):
             cursor.execute(
                 'INSERT INTO poll_book_options (poll_id, option_index, book_id) VALUES (%s, %s, %s)',
                 (poll_id, i, book_id),
