@@ -350,6 +350,47 @@ def bot_get_member_books(telegram_id: int, telegram_username: str | None = None)
     return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
 
 
+@bot_router.get('/books/recently-read')
+def bot_get_recently_read(n: int = 5):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT b.id, b.title, a.name
+            FROM books b
+            LEFT JOIN authors a ON a.id = b.author_id
+            WHERE b.status = 'read' AND (b.discussion_url IS NULL OR b.discussion_url = '')
+            ORDER BY b.elected_at DESC NULLS LAST
+            LIMIT %s
+        """, (n,))
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+    return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
+
+
+@bot_router.put('/books/{book_id}/discussion_url')
+def bot_save_discussion_url(book_id: int, data: dict):
+    discussion_url = data.get('discussion_url', '').strip()
+    if not discussion_url:
+        raise HTTPException(status_code=400, detail='discussion_url is required')
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('UPDATE books SET discussion_url = %s WHERE id = %s RETURNING id', (discussion_url, book_id))
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail='Book not found')
+        conn.commit()
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail='Не удалось сохранить ссылку')
+    finally:
+        conn.close()
+
+
 @bot_router.get('/books/without-cover')
 def bot_get_books_without_cover():
     conn = get_connection()
