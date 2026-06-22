@@ -350,6 +350,24 @@ def bot_get_member_books(telegram_id: int, telegram_username: str | None = None)
     return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
 
 
+@bot_router.get('/books/without-cover')
+def bot_get_books_without_cover():
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT b.id, b.title, a.name
+            FROM books b
+            LEFT JOIN authors a ON a.id = b.author_id
+            WHERE b.status != 'removed' AND (b.cover_url IS NULL OR b.cover_url = '')
+            ORDER BY b.title
+        """)
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+    return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
+
+
 @bot_router.get('/books/search')
 def bot_search_books(q: str):
     conn = get_connection()
