@@ -6,3 +6,5 @@ psycopg2-binary==2.9.11
 python-dotenv==1.2.2
 pydantic==2.11.3
 python-jose[cryptography]==3.5.0
+httpx==0.28.1
+beautifulsoup4==4.13.4

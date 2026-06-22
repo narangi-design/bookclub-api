@@ -12,6 +12,7 @@ from datetime import date
 from db import get_connection, get_data
 from auth import hash_password, create_access_token, get_current_user
 from matching import find_match, fuzzy_find, dedup_book_ids, TITLE_MATCH_THRESHOLD, AUTHOR_MATCH_THRESHOLD
+from cover_search import find_covers
 
 load_dotenv()
 
@@ -371,6 +372,43 @@ def bot_search_books(q: str):
         if fuzz.token_sort_ratio(q.lower(), title.lower()) >= TITLE_MATCH_THRESHOLD:
             results.append({'id': book_id, 'title': title, 'author': author})
     return results
+
+
+@bot_router.get('/books/{book_id}/covers')
+def bot_get_book_covers(book_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT b.title, a.name FROM books b LEFT JOIN authors a ON b.author_id = a.id WHERE b.id = %s', (book_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail='Book not found')
+        title, author = row
+        return find_covers(title, author)
+    finally:
+        conn.close()
+
+
+@bot_router.put('/books/{book_id}/cover_url')
+def bot_save_cover_url(book_id: int, data: dict):
+    cover_url = data.get('cover_url', '').strip()
+    if not cover_url:
+        raise HTTPException(status_code=400, detail='cover_url is required')
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING id', (cover_url, book_id))
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail='Book not found')
+        conn.commit()
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail='Не удалось сохранить обложку')
+    finally:
+        conn.close()
 
 
 @bot_router.delete('/books/{book_id}')
