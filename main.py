@@ -9,6 +9,8 @@ import math
 import random
 from datetime import date
 
+import httpx
+
 from db import get_connection, get_data
 from auth import hash_password, create_access_token, get_current_user
 from matching import find_match, fuzzy_find, dedup_book_ids, TITLE_MATCH_THRESHOLD, AUTHOR_MATCH_THRESHOLD
@@ -389,15 +391,48 @@ def bot_get_book_covers(book_id: int):
         conn.close()
 
 
+def _upload_to_storage(book_id: int, image_bytes: bytes, content_type: str) -> str:
+    supabase_url = os.getenv('SUPABASE_URL')
+    service_key = os.getenv('SUPABASE_SERVICE_KEY')
+    ext = 'jpg' if 'jpeg' in content_type else content_type.split('/')[-1]
+    filename = f'{book_id}.{ext}'
+    r = httpx.put(
+        f'{supabase_url}/storage/v1/object/covers/{filename}',
+        content=image_bytes,
+        headers={
+            'Authorization': f'Bearer {service_key}',
+            'Content-Type': content_type,
+            'x-upsert': 'true',
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    return f'{supabase_url}/storage/v1/object/public/covers/{filename}'
+
+
 @bot_router.put('/books/{book_id}/cover_url')
 def bot_save_cover_url(book_id: int, data: dict):
-    cover_url = data.get('cover_url', '').strip()
-    if not cover_url:
+    source_url = data.get('cover_url', '').strip()
+    if not source_url:
         raise HTTPException(status_code=400, detail='cover_url is required')
+
+    try:
+        r = httpx.get(source_url, timeout=15, follow_redirects=True)
+        r.raise_for_status()
+        image_bytes = r.content
+        content_type = r.headers.get('content-type', 'image/jpeg').split(';')[0]
+    except Exception:
+        raise HTTPException(status_code=502, detail='Не удалось скачать обложку')
+
+    try:
+        stored_url = _upload_to_storage(book_id, image_bytes, content_type)
+    except Exception:
+        raise HTTPException(status_code=502, detail='Не удалось загрузить обложку в хранилище')
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING id', (cover_url, book_id))
+        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING id', (stored_url, book_id))
         if cursor.fetchone() is None:
             raise HTTPException(status_code=404, detail='Book not found')
         conn.commit()

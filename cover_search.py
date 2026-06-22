@@ -35,8 +35,8 @@ def _litres_cover_id(url: str) -> str | None:
 
 def _google_url(volume_id: str) -> str:
     return (
-        f'http://books.google.com/books/content'
-        f'?id={volume_id}&printsec=frontcover&img=1&zoom=0&source=gbs_api'
+        f'https://books.google.com/books/content'
+        f'?id={volume_id}&printsec=frontcover&img=1&zoom=5&source=gbs_api'
     )
 
 
