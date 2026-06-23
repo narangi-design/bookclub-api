@@ -224,6 +224,7 @@ class BotCreatePollData(BaseModel):
     date: str
     telegram_poll_id: str
     book_ids: list[int]
+    parent_poll_id: int | None = None
 
 @bot_router.post('/polls')
 def bot_create_poll(data: BotCreatePollData):
@@ -231,8 +232,8 @@ def bot_create_poll(data: BotCreatePollData):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            'INSERT INTO polls (stage, date, telegram_poll_id) VALUES (%s, %s, %s) RETURNING id',
-            (data.stage, data.date, data.telegram_poll_id),
+            'INSERT INTO polls (stage, date, telegram_poll_id, parent_poll_id) VALUES (%s, %s, %s, %s) RETURNING id',
+            (data.stage, data.date, data.telegram_poll_id, data.parent_poll_id),
         )
         poll_id = cursor.fetchone()[0]
         unique_book_ids = dedup_book_ids(data.book_ids)
@@ -246,6 +247,35 @@ def bot_create_poll(data: BotCreatePollData):
     except Exception:
         conn.rollback()
         raise HTTPException(status_code=500, detail='Не удалось создать опрос')
+    finally:
+        conn.close()
+
+
+@bot_router.get('/polls/{telegram_poll_id}/tied-books')
+def bot_get_tied_books(telegram_poll_id: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id FROM polls WHERE telegram_poll_id = %s', (telegram_poll_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail='Poll not found')
+        poll_id = row[0]
+
+        cursor.execute('''
+            SELECT pv.book_id, b.title, a.name, pv.votes_count
+            FROM poll_votes pv
+            JOIN books b ON b.id = pv.book_id
+            LEFT JOIN authors a ON a.id = b.author_id
+            WHERE pv.poll_id = %s AND pv.votes_count = (
+                SELECT MAX(votes_count) FROM poll_votes WHERE poll_id = %s
+            )
+        ''', (poll_id, poll_id))
+        rows = cursor.fetchall()
+        return {
+            'poll_id': poll_id,
+            'books': [{'id': r[0], 'title': r[1], 'author': r[2], 'votes': r[3]} for r in rows],
+        }
     finally:
         conn.close()
 
@@ -294,9 +324,12 @@ def bot_save_poll_results(data: BotSavePollResultsData):
 
         winner_info = None
         if winner_book_id:
-            cursor.execute('SELECT date FROM polls WHERE id = %s', (poll_id,))
-            poll_date = cursor.fetchone()[0]
+            cursor.execute('SELECT date, parent_poll_id FROM polls WHERE id = %s', (poll_id,))
+            poll_row = cursor.fetchone()
+            poll_date, parent_poll_id = poll_row
             cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, poll_id))
+            if parent_poll_id:
+                cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, parent_poll_id))
             cursor.execute(
                 "UPDATE books SET status = 'read', elected_poll_id = %s, elected_at = %s WHERE id = %s",
                 (poll_id, poll_date, winner_book_id),

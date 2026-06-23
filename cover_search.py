@@ -139,7 +139,7 @@ def _cli_search(book_id: int) -> None:
 
     covers = find_covers(title, author)
     if not covers:
-        print('Обложки не найдены')
+        print('Не нашёл обложки. 🥺')
         return
 
     print(f'Найдено: {len(covers)}')
