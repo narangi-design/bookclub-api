@@ -309,7 +309,7 @@ def bot_save_poll_results(data: BotSavePollResultsData):
         tied_books = None
 
         if is_tie:
-            tied_books = [{'id': r[0], 'title': r[2], 'author': r[3], 'votes': r[1]} for r in top_books]
+            tied_books = [{'id': r[0], 'title': r[2], 'author_name': r[3], 'votes': r[1]} for r in top_books]
         else:
             winner_book_id = top_books[0][0] if top_books else None
             if winner_book_id:
@@ -324,9 +324,9 @@ def bot_save_poll_results(data: BotSavePollResultsData):
                 )
                 winner_info = {
                     'book_id': winner_book_id,
-                    'title': top_books[0][2],
-                    'author': top_books[0][3],
-                    'added_by_username': top_books[0][4],
+                    'book_title': top_books[0][2],
+                    'author_name': top_books[0][3],
+                    'member_username': top_books[0][4],
                     'votes': max_votes,
                 }
 
@@ -360,7 +360,7 @@ def bot_get_member_books(telegram_id: int, telegram_username: str | None = None)
         conn.commit()
     finally:
         conn.close()
-    return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
+    return [{'id': r[0], 'title': r[1], 'author_name': r[2]} for r in rows]
 
 
 @bot_router.get('/books/recently-read')
@@ -379,7 +379,7 @@ def bot_get_recently_read(n: int = 5):
         rows = cursor.fetchall()
     finally:
         conn.close()
-    return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
+    return [{'id': r[0], 'title': r[1], 'author_name': r[2]} for r in rows]
 
 
 @bot_router.put('/books/{book_id}/discussion_url')
@@ -419,7 +419,7 @@ def bot_get_books_without_cover():
         rows = cursor.fetchall()
     finally:
         conn.close()
-    return [{'id': r[0], 'title': r[1], 'author': r[2]} for r in rows]
+    return [{'id': r[0], 'title': r[1], 'author_name': r[2]} for r in rows]
 
 
 @bot_router.get('/books/search')
@@ -444,7 +444,7 @@ def bot_search_books(q: str):
     results = []
     for book_id, title, author in rows:
         if fuzz.token_sort_ratio(q.lower(), title.lower()) >= TITLE_MATCH_THRESHOLD:
-            results.append({'id': book_id, 'title': title, 'author': author})
+            results.append({'id': book_id, 'title': title, 'author_name': author})
     return results
 
 
