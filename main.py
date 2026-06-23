@@ -251,34 +251,6 @@ def bot_create_poll(data: BotCreatePollData):
         conn.close()
 
 
-@bot_router.get('/polls/{telegram_poll_id}/tied-books')
-def bot_get_tied_books(telegram_poll_id: str):
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute('SELECT id FROM polls WHERE telegram_poll_id = %s', (telegram_poll_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail='Poll not found')
-        poll_id = row[0]
-
-        cursor.execute('''
-            SELECT pv.book_id, b.title, a.name, pv.votes_count
-            FROM poll_votes pv
-            JOIN books b ON b.id = pv.book_id
-            LEFT JOIN authors a ON a.id = b.author_id
-            WHERE pv.poll_id = %s AND pv.votes_count = (
-                SELECT MAX(votes_count) FROM poll_votes WHERE poll_id = %s
-            )
-        ''', (poll_id, poll_id))
-        rows = cursor.fetchall()
-        return {
-            'poll_id': poll_id,
-            'books': [{'id': r[0], 'title': r[1], 'author': r[2], 'votes': r[3]} for r in rows],
-        }
-    finally:
-        conn.close()
-
 
 class PollOptionResult(BaseModel):
     option_index: int
@@ -302,56 +274,64 @@ def bot_save_poll_results(data: BotSavePollResultsData):
 
         cursor.execute('UPDATE polls SET total_voters = %s WHERE id = %s', (data.total_voters, poll_id))
 
+        cursor.execute('SELECT COUNT(*) FROM poll_votes WHERE poll_id = %s', (poll_id,))
+        already_saved = cursor.fetchone()[0] > 0
+
+        if not already_saved:
+            cursor.execute(
+                'SELECT option_index, book_id FROM poll_book_options WHERE poll_id = %s',
+                (poll_id,),
+            )
+            option_to_book = {r[0]: r[1] for r in cursor.fetchall()}
+            for opt in data.options:
+                book_id = option_to_book.get(opt.option_index)
+                if book_id is not None:
+                    cursor.execute(
+                        'INSERT INTO poll_votes (poll_id, book_id, votes_count) VALUES (%s, %s, %s)',
+                        (poll_id, book_id, opt.votes_count),
+                    )
+
         cursor.execute(
-            'SELECT option_index, book_id FROM poll_book_options WHERE poll_id = %s',
+            'SELECT pv.book_id, pv.votes_count, b.title, a.name, m.telegram_username '
+            'FROM poll_votes pv '
+            'JOIN books b ON b.id = pv.book_id '
+            'LEFT JOIN authors a ON a.id = b.author_id '
+            'LEFT JOIN members m ON m.id = b.added_by_member_id '
+            'WHERE pv.poll_id = %s',
             (poll_id,),
         )
-        option_to_book = {r[0]: r[1] for r in cursor.fetchall()}
-
-        winner_book_id = None
-        winner_votes = -1
-        for opt in data.options:
-            book_id = option_to_book.get(opt.option_index)
-            if book_id is None:
-                continue
-            cursor.execute(
-                'INSERT INTO poll_votes (poll_id, book_id, votes_count) VALUES (%s, %s, %s)',
-                (poll_id, book_id, opt.votes_count),
-            )
-            if opt.votes_count > winner_votes:
-                winner_votes = opt.votes_count
-                winner_book_id = book_id
+        vote_rows = cursor.fetchall()
+        max_votes = max((r[1] for r in vote_rows), default=0)
+        top_books = [r for r in vote_rows if r[1] == max_votes]
+        is_tie = len(top_books) > 1
 
         winner_info = None
-        if winner_book_id:
-            cursor.execute('SELECT date, parent_poll_id FROM polls WHERE id = %s', (poll_id,))
-            poll_row = cursor.fetchone()
-            poll_date, parent_poll_id = poll_row
-            cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, poll_id))
-            if parent_poll_id:
-                cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, parent_poll_id))
-            cursor.execute(
-                "UPDATE books SET status = 'read', elected_poll_id = %s, elected_at = %s WHERE id = %s",
-                (poll_id, poll_date, winner_book_id),
-            )
-            cursor.execute('''
-                SELECT b.title, a.name, m.telegram_username
-                FROM books b
-                LEFT JOIN authors a ON a.id = b.author_id
-                LEFT JOIN members m ON m.id = b.added_by_member_id
-                WHERE b.id = %s
-            ''', (winner_book_id,))
-            row = cursor.fetchone()
-            winner_info = {
-                'book_id': winner_book_id,
-                'title': row[0],
-                'author': row[1],
-                'added_by_username': row[2],
-                'votes': winner_votes,
-            }
+        tied_books = None
+
+        if is_tie:
+            tied_books = [{'id': r[0], 'title': r[2], 'author': r[3], 'votes': r[1]} for r in top_books]
+        else:
+            winner_book_id = top_books[0][0] if top_books else None
+            if winner_book_id:
+                cursor.execute('SELECT date, parent_poll_id FROM polls WHERE id = %s', (poll_id,))
+                poll_date, parent_poll_id = cursor.fetchone()
+                cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, poll_id))
+                if parent_poll_id:
+                    cursor.execute('UPDATE polls SET winner_book_id = %s WHERE id = %s', (winner_book_id, parent_poll_id))
+                cursor.execute(
+                    "UPDATE books SET status = 'read', elected_poll_id = %s, elected_at = %s WHERE id = %s",
+                    (poll_id, poll_date, winner_book_id),
+                )
+                winner_info = {
+                    'book_id': winner_book_id,
+                    'title': top_books[0][2],
+                    'author': top_books[0][3],
+                    'added_by_username': top_books[0][4],
+                    'votes': max_votes,
+                }
 
         conn.commit()
-        return {'ok': True, 'winner': winner_info, 'total_voters': data.total_voters}
+        return {'ok': True, 'poll_id': poll_id, 'winner': winner_info, 'tied_books': tied_books, 'total_voters': data.total_voters}
     except HTTPException:
         raise
     except Exception:
