@@ -324,9 +324,10 @@ def bot_save_poll_results(data: BotSavePollResultsData):
                 )
                 cursor.execute("""
                     SELECT b.added_at, b.cover_url, m.telegram_fullname,
-                           (SELECT COUNT(*) FROM poll_votes pv2
+                           (SELECT COUNT(*)
+                            FROM poll_votes pv2
                             JOIN polls p2 ON p2.id = pv2.poll_id
-                            WHERE pv2.book_id = b.id AND p2.stage = 1) AS poll_appearances
+                            WHERE pv2.book_id = b.id AND p2.parent_poll_id IS NULL) AS poll_appearances
                     FROM books b
                     LEFT JOIN members m ON m.id = b.added_by_member_id
                     WHERE b.id = %s
@@ -594,6 +595,7 @@ def get_polls():
 @app.get('/api/poll-votes')
 def get_poll_votes():
     return get_data('poll_votes')
+
 
 @app.get('/api/award-votes')
 def get_award_votes():
