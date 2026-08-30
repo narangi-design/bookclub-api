@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Request
 from mangum import Mangum
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -480,6 +480,35 @@ def _upload_to_storage(book_id: int, image_bytes: bytes, content_type: str) -> s
     )
     r.raise_for_status()
     return f'{supabase_url}/storage/v1/object/public/covers/{filename}'
+
+
+@bot_router.put('/books/{book_id}/cover')
+async def bot_save_cover_bytes(book_id: int, request: Request):
+    image_bytes = await request.body()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail='image body is required')
+    content_type = request.headers.get('content-type', 'image/jpeg').split(';')[0]
+
+    try:
+        stored_url = _upload_to_storage(book_id, image_bytes, content_type)
+    except Exception:
+        raise HTTPException(status_code=502, detail='Не удалось загрузить обложку в хранилище')
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING id', (stored_url, book_id))
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail='Book not found')
+        conn.commit()
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail='Не удалось сохранить обложку')
+    finally:
+        conn.close()
 
 
 @bot_router.put('/books/{book_id}/cover_url')
