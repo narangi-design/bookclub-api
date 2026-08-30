@@ -322,12 +322,26 @@ def bot_save_poll_results(data: BotSavePollResultsData):
                     "UPDATE books SET status = 'read', elected_poll_id = %s, elected_at = %s WHERE id = %s",
                     (poll_id, poll_date, winner_book_id),
                 )
+                cursor.execute("""
+                    SELECT b.added_at, b.cover_url, m.telegram_fullname,
+                           (SELECT COUNT(*) FROM poll_votes pv2
+                            JOIN polls p2 ON p2.id = pv2.poll_id
+                            WHERE pv2.book_id = b.id AND p2.stage = 1) AS poll_appearances
+                    FROM books b
+                    LEFT JOIN members m ON m.id = b.added_by_member_id
+                    WHERE b.id = %s
+                """, (winner_book_id,))
+                extra = cursor.fetchone()
                 winner_info = {
                     'book_id': winner_book_id,
                     'book_title': top_books[0][2],
                     'author_name': top_books[0][3],
                     'member_username': top_books[0][4],
+                    'member_fullname': extra[2],
                     'votes': max_votes,
+                    'added_at': extra[0].isoformat() if extra[0] else None,
+                    'cover_url': extra[1],
+                    'poll_appearances': extra[3],
                 }
 
         conn.commit()
