@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-REST API for a book club (FastAPI on Vercel via Mangum). Stores data in PostgreSQL (Supabase) and book cover images in Supabase Storage. All club content (book titles, member names, bot-facing error messages) is in Russian — keep new user-facing strings in Russian too.
+REST API for a book club (FastAPI, run via uvicorn in Docker on a private VPS). Stores data in PostgreSQL (Supabase) and book cover images in Supabase Storage. All club content (book titles, member names, bot-facing error messages) is in Russian — keep new user-facing strings in Russian too.
 
 Part of a 3-repo project: this API, a Telegram bot (`bookclub-chatbot`) that drives all bot-facing endpoints, and a web dashboard (`bookclub-frontend`) that reads the public endpoints.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt          # runtime deps only
+pip install -r requirements-dev.txt      # runtime + pytest, for running tests
 uvicorn main:app --reload          # run locally, http://localhost:8000
 
 pytest                              # run all tests
@@ -38,7 +39,7 @@ API_URL=                # only used by cover_search.py's dev CLI
 
 Everything lives in five flat modules — there's no package structure to navigate:
 
-- **main.py** — the entire route surface. One `FastAPI()` app plus one `APIRouter(prefix='/api/bot', dependencies=[Depends(verify_bot_secret)])` mounted into it. Deployed on Vercel as a single serverless function (`handler = Mangum(app)`); `vercel.json` routes everything to `main.py`.
+- **main.py** — the entire route surface. One `FastAPI()` app plus one `APIRouter(prefix='/api/bot', dependencies=[Depends(verify_bot_secret)])` mounted into it. Deployed via Docker on a VPS, served directly by uvicorn (`CMD ["uvicorn", "main:app", ...]` in the Dockerfile) — no serverless adapter involved.
 - **db.py** — `get_connection()` opens a fresh `psycopg2` connection per call (no pooling). `get_data(table_name)` is a generic `SELECT *` used by the simple public list endpoints.
 - **auth.py** — JWT auth for the dashboard's protected endpoints (`get_current_user` dependency, `HTTPBearer`). Passwords are SHA-256 (unsalted) via `hash_password`, not bcrypt — this is existing behavior, don't "fix" it as a drive-by.
 - **matching.py** — rapidfuzz-based fuzzy matching (`find_match`: exact case-insensitive match first, then `fuzzy_find` via `token_sort_ratio`). `TITLE_MATCH_THRESHOLD` (90) and `AUTHOR_MATCH_THRESHOLD` (93) are deliberately different — see `test_matching.py`'s Сорокин/Серкин tests for why the author threshold is tuned tighter (a lower threshold would confuse two distinct real author names that score ~90% similar).

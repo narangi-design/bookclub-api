@@ -1,5 +1,4 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Request
-from mangum import Mangum
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -512,11 +511,12 @@ async def bot_save_cover_bytes(book_id: int, request: Request):
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING id', (stored_url, book_id))
-        if cursor.fetchone() is None:
+        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING title', (stored_url, book_id))
+        row = cursor.fetchone()
+        if row is None:
             raise HTTPException(status_code=404, detail='Book not found')
         conn.commit()
-        return {'ok': True}
+        return {'ok': True, 'title': row[0]}
     except HTTPException:
         raise
     except Exception:
@@ -548,11 +548,12 @@ def bot_save_cover_url(book_id: int, data: dict):
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING id', (stored_url, book_id))
-        if cursor.fetchone() is None:
+        cursor.execute('UPDATE books SET cover_url = %s WHERE id = %s RETURNING title', (stored_url, book_id))
+        row = cursor.fetchone()
+        if row is None:
             raise HTTPException(status_code=404, detail='Book not found')
         conn.commit()
-        return {'ok': True}
+        return {'ok': True, 'title': row[0]}
     except HTTPException:
         raise
     except Exception:
@@ -684,6 +685,3 @@ def update_account(data: UpdateAccountData, current_user: dict = Depends(get_cur
         raise HTTPException(status_code=500, detail='Не удалось обновить данные')
     finally:
         conn.close()
-
-
-handler = Mangum(app)

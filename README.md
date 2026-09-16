@@ -10,7 +10,7 @@ Part of the [Book Club](https://github.com/stars/narangi-design/lists/book-club)
 
 ## Stack
 
-- **FastAPI 0.135** + **Mangum** — API framework and Vercel adapter
+- **FastAPI 0.135** + **uvicorn** — API framework, run in Docker on a private VPS
 - **psycopg2** — PostgreSQL connection
 - **httpx** — cover image downloading
 - **rapidfuzz** — fuzzy title and author matching
@@ -75,6 +75,13 @@ GOOGLE_BOOKS_API_KEY=
 ALLOWED_ORIGINS=http://localhost:5173
 ```
 
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ---
 
 ## Technical decisions
@@ -98,7 +105,7 @@ Covers are downloaded and re-uploaded to Supabase Storage rather than storing ex
 
 ## Future improvements
 
-- Endpoints for automated weekly rubric posts (Vercel Cron)
+- Endpoints for automated weekly rubric posts (e.g. via a system cron job on the VPS)
 - Store discussion recording duration alongside the URL
 
 ---
