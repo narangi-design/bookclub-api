@@ -27,6 +27,8 @@ Required `.env` (note: the code reads `JWT_SECRET_KEY`, not `JWT_SECRET` as an o
 DATABASE_URL=
 JWT_SECRET_KEY=
 BOT_SECRET=
+BOT_TOKEN=              # same Telegram bot token as bookclub-chatbot — used to verify Login Widget payloads and call getChatMember
+TELEGRAM_CHAT_ID=       # optional — the club's group chat id; unset means Telegram login is disabled and only password login works
 GOOGLE_BOOKS_API_KEY=
 LITRES_COOKIES=        # JSON dict of cookies, optional — enables LitRes cover fallback
 ALLOWED_ORIGINS=http://localhost:5173

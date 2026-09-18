@@ -15,7 +15,7 @@ from io import BytesIO
 from PIL import Image
 
 from db import get_connection, get_data
-from auth import hash_password, create_access_token, get_current_user
+from auth import hash_password, create_access_token, get_current_user, verify_telegram_auth, is_chat_member
 from matching import find_match, fuzzy_find, dedup_book_ids, TITLE_MATCH_THRESHOLD, AUTHOR_MATCH_THRESHOLD
 from cover_search import find_covers
 
@@ -39,6 +39,17 @@ def resolve_member_id(cursor, telegram_id: int, telegram_username: str | None) -
         if row:
             cursor.execute('UPDATE members SET telegram_id = %s WHERE id = %s', (telegram_id, row[0]))
     return row[0] if row else None
+
+
+def find_or_create_member(cursor, telegram_id: int, telegram_username: str | None, telegram_fullname: str | None = None) -> int:
+    member_id = resolve_member_id(cursor, telegram_id, telegram_username)
+    if member_id is None:
+        cursor.execute(
+            'INSERT INTO members (telegram_id, telegram_username, telegram_fullname) VALUES (%s, %s, %s) RETURNING id',
+            (telegram_id, telegram_username, telegram_fullname),
+        )
+        member_id = cursor.fetchone()[0]
+    return member_id
 
 
 def verify_bot_secret(x_bot_secret: str | None = Header(default=None)):
@@ -198,13 +209,7 @@ def bot_add_book(data: BotAddBookData):
             author_id = cursor.fetchone()[0]
 
         # Step 3: find or create member
-        member_id = resolve_member_id(cursor, data.telegram_id, data.telegram_username)
-        if member_id is None:
-            cursor.execute(
-                'INSERT INTO members (telegram_id, telegram_username, telegram_fullname) VALUES (%s, %s, %s) RETURNING id',
-                (data.telegram_id, data.telegram_username, data.telegram_fullname),
-            )
-            member_id = cursor.fetchone()[0]
+        member_id = find_or_create_member(cursor, data.telegram_id, data.telegram_username, data.telegram_fullname)
 
         # Step 4: restore removed book or insert new one
         cursor.execute("SELECT id, title FROM books WHERE status = 'removed'")
@@ -661,12 +666,53 @@ def login(data: LoginData):
     if not user:
         raise HTTPException(status_code=401, detail='Неверный логин или пароль')
 
-    token = create_access_token(user[0], user[1])
+    token = create_access_token(user[0], user[1], 'password')
     return {'access_token': token, 'token_type': 'bearer', 'user_id': user[0], 'name': user[1]}
+
+
+class TelegramLoginData(BaseModel):
+    id: int
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    photo_url: str | None = None
+    auth_date: int
+    hash: str
+
+@app.post('/api/auth/telegram-login')
+def telegram_login(data: TelegramLoginData):
+    bot_token = os.getenv('BOT_TOKEN', '')
+    chat_id = os.getenv('TELEGRAM_CHAT_ID', '')
+    if not bot_token or not chat_id:
+        raise HTTPException(status_code=500, detail='Вход через Telegram не настроен')
+
+    if not verify_telegram_auth(data.model_dump(exclude_none=True), bot_token):
+        raise HTTPException(status_code=401, detail='Недействительные данные Telegram')
+
+    if not is_chat_member(data.id, chat_id, bot_token):
+        raise HTTPException(status_code=403, detail='Вы не состоите в чате клуба')
+
+    fullname = ' '.join(part for part in (data.first_name, data.last_name) if part) or None
+    display_name = data.username or fullname or str(data.id)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        member_id = find_or_create_member(cursor, data.id, data.username, fullname)
+        conn.commit()
+        print(f'[telegram-login] member_id={member_id} telegram_id={data.id} username={data.username}')
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail='Не удалось выполнить вход')
+    finally:
+        conn.close()
+
+    token = create_access_token(member_id, display_name, 'telegram')
+    return {'access_token': token, 'token_type': 'bearer', 'user_id': member_id, 'name': display_name}
 
 @app.get('/api/auth/me')
 def get_me(current_user: dict = Depends(get_current_user)):
-    return {'user_id': current_user['user_id'], 'name': current_user['name']}
+    return {'user_id': current_user['user_id'], 'name': current_user['name'], 'auth_method': current_user['auth_method']}
 
 
 class UpdateAccountData(BaseModel):
@@ -676,6 +722,9 @@ class UpdateAccountData(BaseModel):
 
 @app.put('/api/auth/me')
 def update_account(data: UpdateAccountData, current_user: dict = Depends(get_current_user)):
+    if current_user['auth_method'] != 'password':
+        raise HTTPException(status_code=400, detail='Смена пароля недоступна для входа через Telegram')
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
