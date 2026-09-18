@@ -1,14 +1,18 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import hmac
+import mimetypes
 import os
 import math
 import random
 from datetime import date
 
 import httpx
+from io import BytesIO
+from PIL import Image
 
 from db import get_connection, get_data
 from auth import hash_password, create_access_token, get_current_user
@@ -51,6 +55,16 @@ app.add_middleware(
     allow_methods=['GET', 'POST', 'PUT'],
     allow_headers=['*'],
 )
+
+# Book covers are stored on local disk (mounted as a volume in prod) and
+# served straight back out by this same app, rather than in Supabase Storage.
+# python:3.12-slim has no /etc/mime.types, so the stdlib mimetypes module
+# doesn't know .webp — register it explicitly or StaticFiles serves covers
+# as application/octet-stream.
+mimetypes.add_type('image/webp', '.webp')
+COVERS_DIR = os.getenv('COVERS_DIR', 'covers')
+os.makedirs(COVERS_DIR, exist_ok=True)
+app.mount('/covers', StaticFiles(directory=COVERS_DIR), name='covers')
 
 
 # --- Public endpoints ---
@@ -477,23 +491,36 @@ def bot_get_book_covers(book_id: int):
         conn.close()
 
 
-def _upload_to_storage(book_id: int, image_bytes: bytes, content_type: str) -> str:
-    supabase_url = os.getenv('SUPABASE_URL')
-    service_key = os.getenv('SUPABASE_SERVICE_KEY')
-    ext = 'jpg' if 'jpeg' in content_type else content_type.split('/')[-1]
-    filename = f'{book_id}.{ext}'
-    r = httpx.put(
-        f'{supabase_url}/storage/v1/object/covers/{filename}',
-        content=image_bytes,
-        headers={
-            'Authorization': f'Bearer {service_key}',
-            'Content-Type': content_type,
-            'x-upsert': 'true',
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    return f'{supabase_url}/storage/v1/object/public/covers/{filename}'
+# Caps for the two cover orientations — portrait/square covers (the vast
+# majority) are capped by height, landscape ones by width, ratio preserved.
+# Never upscales: covers already under the cap are left at their own size.
+COVER_MAX_PORTRAIT_HEIGHT = 800
+COVER_MAX_LANDSCAPE_WIDTH = 600
+
+
+def _upload_to_storage(book_id: int, image_bytes: bytes) -> str:
+    """Re-encodes the cover to WebP (uniform format regardless of what the
+    source — Google Books/LitRes/manual upload — sent) and downsizes it."""
+    public_base_url = os.getenv('PUBLIC_API_URL', 'http://localhost:8000').rstrip('/')
+    filename = f'{book_id}.webp'
+
+    image = Image.open(BytesIO(image_bytes))
+    if image.mode not in ('RGB', 'RGBA'):
+        image = image.convert('RGBA' if 'transparency' in image.info or image.mode in ('P', 'LA') else 'RGB')
+
+    width, height = image.size
+    if width <= height and height > COVER_MAX_PORTRAIT_HEIGHT:
+        new_height = COVER_MAX_PORTRAIT_HEIGHT
+        new_width = round(width * (COVER_MAX_PORTRAIT_HEIGHT / height))
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    elif width > height and width > COVER_MAX_LANDSCAPE_WIDTH:
+        new_width = COVER_MAX_LANDSCAPE_WIDTH
+        new_height = round(height * (COVER_MAX_LANDSCAPE_WIDTH / width))
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+    image.save(os.path.join(COVERS_DIR, filename), format='WEBP', quality=85)
+
+    return f'{public_base_url}/covers/{filename}'
 
 
 @bot_router.put('/books/{book_id}/cover')
@@ -501,10 +528,9 @@ async def bot_save_cover_bytes(book_id: int, request: Request):
     image_bytes = await request.body()
     if not image_bytes:
         raise HTTPException(status_code=400, detail='image body is required')
-    content_type = request.headers.get('content-type', 'image/jpeg').split(';')[0]
 
     try:
-        stored_url = _upload_to_storage(book_id, image_bytes, content_type)
+        stored_url = _upload_to_storage(book_id, image_bytes)
     except Exception:
         raise HTTPException(status_code=502, detail='Не удалось загрузить обложку в хранилище')
 
@@ -536,12 +562,11 @@ def bot_save_cover_url(book_id: int, data: dict):
         r = httpx.get(source_url, timeout=15, follow_redirects=True)
         r.raise_for_status()
         image_bytes = r.content
-        content_type = r.headers.get('content-type', 'image/jpeg').split(';')[0]
     except Exception:
         raise HTTPException(status_code=502, detail='Не удалось скачать обложку')
 
     try:
-        stored_url = _upload_to_storage(book_id, image_bytes, content_type)
+        stored_url = _upload_to_storage(book_id, image_bytes)
     except Exception:
         raise HTTPException(status_code=502, detail='Не удалось загрузить обложку в хранилище')
 

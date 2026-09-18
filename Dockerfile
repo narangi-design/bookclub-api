@@ -10,6 +10,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Pre-create so the covers volume mount (see docker-compose.yml) inherits
+# appuser ownership instead of being initialized root-owned by Docker.
+RUN mkdir -p covers
+
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 USER appuser

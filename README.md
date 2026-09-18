@@ -1,6 +1,6 @@
 # bookclub-api
 
-REST API for a book club. Stores data in PostgreSQL (Supabase) and book cover images in Supabase Storage.
+REST API for a book club. Stores data in PostgreSQL (Supabase) and book cover images on local disk, served by this app under `/covers`.
 
 Part of the [Book Club](https://github.com/stars/narangi-design/lists/book-club) project — also includes a [Telegram Bot](https://github.com/narangi-design/bookclub-chatbot) that uses this API for all bot commands, and a [Web Dashboard](https://github.com/narangi-design/bookclub-frontend) that reads club data through the public endpoints.
 
@@ -69,10 +69,10 @@ Required `.env`:
 DATABASE_URL=
 BOT_SECRET=
 JWT_SECRET=
-SUPABASE_URL=
-SUPABASE_SERVICE_KEY=
 GOOGLE_BOOKS_API_KEY=
 ALLOWED_ORIGINS=http://localhost:5173
+COVERS_DIR=             # optional, defaults to ./covers
+PUBLIC_API_URL=         # optional, defaults to http://localhost:8000
 ```
 
 ### Tests
@@ -99,7 +99,7 @@ When a second-round poll is saved, its winner is backfilled to the parent (first
 When adding a book, titles are matched against existing books with rapidfuzz to catch near-duplicates before inserting. Author names go through the same matching to avoid creating duplicate author records.
 
 ### Cover storage
-Covers are downloaded and re-uploaded to Supabase Storage rather than storing external URLs. This avoids broken images if Google Books or LitRes change their URLs.
+Covers are downloaded and re-saved to local disk (served back out under `/covers`) rather than storing external URLs. This avoids broken images if Google Books or LitRes change their URLs. Every cover is also normalized with Pillow: converted to WebP and downsized (aspect ratio preserved, never upscaled) — 800px max height for portrait/square covers, 600px max width for landscape ones.
 
 ---
 

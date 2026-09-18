@@ -5,3 +5,5 @@ __pycache__
 venv
 .env
 .git
+covers_download
+covers

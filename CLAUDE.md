@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-REST API for a book club (FastAPI, run via uvicorn in Docker on a private VPS). Stores data in PostgreSQL (Supabase) and book cover images in Supabase Storage. All club content (book titles, member names, bot-facing error messages) is in Russian — keep new user-facing strings in Russian too.
+REST API for a book club (FastAPI, run via uvicorn in Docker on a private VPS). Stores data in PostgreSQL (Supabase) and book cover images on local disk, served by this app under `/covers` (see `COVERS_DIR`/`PUBLIC_API_URL`, and the `covers_data` volume in `docker-compose.yml`). All club content (book titles, member names, bot-facing error messages) is in Russian — keep new user-facing strings in Russian too.
 
 Part of a 3-repo project: this API, a Telegram bot (`bookclub-chatbot`) that drives all bot-facing endpoints, and a web dashboard (`bookclub-frontend`) that reads the public endpoints.
 
@@ -27,11 +27,11 @@ Required `.env` (note: the code reads `JWT_SECRET_KEY`, not `JWT_SECRET` as an o
 DATABASE_URL=
 JWT_SECRET_KEY=
 BOT_SECRET=
-SUPABASE_URL=
-SUPABASE_SERVICE_KEY=
 GOOGLE_BOOKS_API_KEY=
 LITRES_COOKIES=        # JSON dict of cookies, optional — enables LitRes cover fallback
 ALLOWED_ORIGINS=http://localhost:5173
+COVERS_DIR=             # optional, defaults to ./covers
+PUBLIC_API_URL=         # optional, defaults to http://localhost:8000 — must be the browser-reachable API URL, used to build absolute cover_url values
 API_URL=                # only used by cover_search.py's dev CLI
 ```
 
@@ -73,7 +73,9 @@ Sequential steps, each doing its own fuzzy-match/create-or-reuse: (1) reject if 
 
 ### Cover handling
 
-Covers are always downloaded and re-uploaded into Supabase Storage (`_upload_to_storage` in main.py, bucket `covers`, filename `{book_id}.{ext}`) rather than storing the external Google Books/LitRes URL directly — this avoids broken images if those providers change/expire URLs. Two ways in: `PUT /books/{id}/cover_url` (bot passes a discovered URL, server fetches+re-uploads it) and `PUT /books/{id}/cover` (raw image bytes in the request body, e.g. a manual upload).
+Covers are always downloaded and re-saved to local disk (`_upload_to_storage` in main.py, `COVERS_DIR`, filename `{book_id}.webp`) rather than storing the external Google Books/LitRes URL directly — this avoids broken images if those providers change/expire URLs. Two ways in: `PUT /books/{id}/cover_url` (bot passes a discovered URL, server fetches+re-saves it) and `PUT /books/{id}/cover` (raw image bytes in the request body, e.g. a manual upload). Saved files are served back out at `PUBLIC_API_URL/covers/{filename}` via a `StaticFiles` mount — same process, no separate storage service.
+
+`_upload_to_storage` also normalizes every cover with Pillow: re-encoded to WebP regardless of source format, then downsized (never upscaled) preserving aspect ratio — portrait/square covers (the vast majority) capped at `COVER_MAX_PORTRAIT_HEIGHT` (800px tall), landscape ones capped at `COVER_MAX_LANDSCAPE_WIDTH` (600px wide).
 
 ## Notes for changes
 
