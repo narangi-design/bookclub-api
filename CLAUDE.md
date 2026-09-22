@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-REST API for a book club (FastAPI, run via uvicorn in Docker on a private VPS). Stores data in PostgreSQL (Supabase) and book cover images on local disk, served by this app under `/covers` (see `COVERS_DIR`/`PUBLIC_API_URL`, and the `covers_data` volume in `docker-compose.yml`). All club content (book titles, member names, bot-facing error messages) is in Russian — keep new user-facing strings in Russian too.
+REST API for a book club (FastAPI, run via uvicorn in Docker on a private VPS). Stores data in a self-hosted PostgreSQL instance (see the root `docker-compose.yml`'s `postgres` service and `db/init.sql` — migrated off Supabase) and book cover images on local disk, served by this app under `/covers` (see `COVERS_DIR`/`PUBLIC_API_URL`, and the `covers_data` volume in `docker-compose.yml`). All club content (book titles, member names, bot-facing error messages) is in Russian — keep new user-facing strings in Russian too.
 
 Part of a 3-repo project: this API, a Telegram bot (`bookclub-chatbot`) that drives all bot-facing endpoints, and a web dashboard (`bookclub-frontend`) that reads the public endpoints.
 

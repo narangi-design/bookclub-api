@@ -8,7 +8,7 @@ import mimetypes
 import os
 import math
 import random
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 from io import BytesIO
@@ -24,6 +24,28 @@ load_dotenv()
 # Added to days_since_poll so books that have never appeared in a poll
 # still get a meaningful weight (otherwise days_since_poll = 0 collapses their chance)
 POLL_RECENCY_BOOST = 90
+
+# Book of the Year survey — hardcoded for this year, see prepare_survey_candidates.py
+# for how survey_candidates gets populated before the survey opens.
+# TEMP for testing: 2022 instead of 2026 so the heuristic/close_survey.py flow
+# can be tested against real, already-complete data — 2022 has no existing
+# award_votes/award_events rows (unlike 2023-2025), so close_survey.py can
+# actually run instead of hitting its "already closed" guard. Switch back to
+# 2026 before launch.
+SURVEY_YEAR = 2022
+SURVEY_DEADLINE = datetime(2027, 1, 10, 23, 59, 59, tzinfo=timezone.utc)
+TIEBREAK_DURATION_DAYS = 2
+
+# TEMP for testing: lets whoever has shell access flip the survey to
+# "closed" on demand (`touch`/`rm` this path in the running container)
+# without waiting for SURVEY_DEADLINE or rebuilding. Doesn't touch
+# SURVEY_DEADLINE itself. Remove this override before the real launch.
+SURVEY_FORCE_CLOSED_FLAG = '/tmp/survey_force_closed'
+
+def _survey_is_closed() -> bool:
+    if os.path.exists(SURVEY_FORCE_CLOSED_FLAG):
+        return True
+    return datetime.now(timezone.utc) > SURVEY_DEADLINE
 
 
 app = FastAPI()
@@ -642,6 +664,254 @@ def get_award_events():
 @app.get('/api/members')
 def get_members(current_user: dict = Depends(get_current_user)):
     return get_data('members')
+
+
+# --- Survey ("Книга года") ---
+
+def require_telegram_member(current_user: dict) -> int:
+    """Returns the member_id for a Telegram-authenticated user, or raises 403.
+    Password logins are dashboard-only and have no reliable mapping to a
+    members row, so the survey is Telegram-only."""
+    if current_user['auth_method'] != 'telegram':
+        raise HTTPException(status_code=403, detail='Опрос доступен только через вход по Telegram')
+    return current_user['user_id']
+
+
+@app.get('/api/survey/meta')
+def get_survey_meta():
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT COUNT(*) FROM survey_candidates WHERE year = %s', (SURVEY_YEAR,))
+        candidate_count = cursor.fetchone()[0]
+    finally:
+        conn.close()
+    return {
+        'year': SURVEY_YEAR,
+        'deadline': SURVEY_DEADLINE.isoformat(),
+        'candidate_count': candidate_count,
+        'is_closed': _survey_is_closed(),
+    }
+
+
+@app.get('/api/survey/candidates')
+def get_survey_candidates():
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT b.* FROM survey_candidates sc JOIN books b ON b.id = sc.book_id WHERE sc.year = %s',
+            (SURVEY_YEAR,),
+        )
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+    return rows
+
+
+@app.get('/api/survey/response')
+def get_survey_response(current_user: dict = Depends(get_current_user)):
+    member_id = require_telegram_member(current_user)
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT id, books_read_count, open_text FROM survey_responses WHERE year = %s AND member_id = %s',
+            (SURVEY_YEAR, member_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {'favorite_book_ids': [], 'least_favorite_book_ids': [], 'books_read_count': None, 'open_text': None}
+        response_id, books_read_count, open_text = row
+
+        cursor.execute('SELECT book_id, kind FROM survey_response_books WHERE response_id = %s', (response_id,))
+        favorite_ids, least_favorite_ids = [], []
+        for book_id, kind in cursor.fetchall():
+            (favorite_ids if kind == 'favorite' else least_favorite_ids).append(book_id)
+    finally:
+        conn.close()
+    return {
+        'favorite_book_ids': favorite_ids,
+        'least_favorite_book_ids': least_favorite_ids,
+        'books_read_count': books_read_count,
+        'open_text': open_text,
+    }
+
+
+class SurveyResponseData(BaseModel):
+    favorite_book_ids: list[int]
+    least_favorite_book_ids: list[int]
+    books_read_count: int | None = None
+    open_text: str | None = None
+
+@app.put('/api/survey/response')
+def put_survey_response(data: SurveyResponseData, current_user: dict = Depends(get_current_user)):
+    member_id = require_telegram_member(current_user)
+
+    if _survey_is_closed():
+        raise HTTPException(status_code=403, detail='Приём ответов уже закрыт')
+
+    favorite_ids = dedup_book_ids(data.favorite_book_ids)
+    least_favorite_ids = dedup_book_ids(data.least_favorite_book_ids)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT book_id FROM survey_candidates WHERE year = %s', (SURVEY_YEAR,))
+        candidate_ids = {r[0] for r in cursor.fetchall()}
+        submitted_ids = set(favorite_ids) | set(least_favorite_ids)
+        if not submitted_ids <= candidate_ids:
+            raise HTTPException(status_code=400, detail='Среди выбранных книг есть те, что не участвуют в премии')
+
+        if data.books_read_count is not None and not (0 <= data.books_read_count <= len(candidate_ids)):
+            raise HTTPException(status_code=400, detail='Некорректное число прочитанных книг')
+
+        cursor.execute(
+            '''
+            INSERT INTO survey_responses (year, member_id, books_read_count, open_text, updated_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (year, member_id)
+            DO UPDATE SET books_read_count = EXCLUDED.books_read_count, open_text = EXCLUDED.open_text, updated_at = now()
+            RETURNING id
+            ''',
+            (SURVEY_YEAR, member_id, data.books_read_count, data.open_text),
+        )
+        response_id = cursor.fetchone()[0]
+
+        cursor.execute('DELETE FROM survey_response_books WHERE response_id = %s', (response_id,))
+        for book_id in favorite_ids:
+            cursor.execute(
+                'INSERT INTO survey_response_books (response_id, book_id, kind) VALUES (%s, %s, %s)',
+                (response_id, book_id, 'favorite'),
+            )
+        for book_id in least_favorite_ids:
+            cursor.execute(
+                'INSERT INTO survey_response_books (response_id, book_id, kind) VALUES (%s, %s, %s)',
+                (response_id, book_id, 'least_favorite'),
+            )
+
+        conn.commit()
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail='Не удалось сохранить ответ')
+    finally:
+        conn.close()
+
+
+@app.get('/api/survey/open-texts')
+def get_survey_open_texts():
+    if not _survey_is_closed():
+        return []
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT open_text FROM survey_responses WHERE year = %s AND open_text IS NOT NULL AND open_text != ''",
+            (SURVEY_YEAR,),
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+@app.get('/api/survey/tiebreaks')
+def get_survey_tiebreaks():
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT id, category, deadline, resolved FROM survey_tiebreaks WHERE year = %s',
+            (SURVEY_YEAR,),
+        )
+        rows = cursor.fetchall()
+        result = []
+        for tb_id, category, deadline, resolved in rows:
+            cursor.execute('SELECT book_id FROM survey_tiebreak_candidates WHERE tiebreak_id = %s', (tb_id,))
+            result.append({
+                'category': category,
+                'deadline': deadline.isoformat(),
+                'candidate_book_ids': [r[0] for r in cursor.fetchall()],
+                'resolved': resolved,
+            })
+    finally:
+        conn.close()
+    return result
+
+
+@app.get('/api/survey/tiebreaks/{category}/vote')
+def get_tiebreak_vote(category: str, current_user: dict = Depends(get_current_user)):
+    member_id = require_telegram_member(current_user)
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''
+            SELECT tv.book_id
+            FROM survey_tiebreak_votes tv
+            JOIN survey_tiebreaks tb ON tb.id = tv.tiebreak_id
+            WHERE tb.year = %s AND tb.category = %s AND tv.member_id = %s
+            ''',
+            (SURVEY_YEAR, category, member_id),
+        )
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    return {'book_id': row[0] if row else None}
+
+
+class TiebreakVoteData(BaseModel):
+    book_id: int
+
+@app.put('/api/survey/tiebreaks/{category}/vote')
+def put_tiebreak_vote(category: str, data: TiebreakVoteData, current_user: dict = Depends(get_current_user)):
+    member_id = require_telegram_member(current_user)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT id, deadline FROM survey_tiebreaks WHERE year = %s AND category = %s',
+            (SURVEY_YEAR, category),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail='Тай-брейк не найден')
+        tiebreak_id, deadline = row
+
+        if datetime.now(timezone.utc) > deadline:
+            raise HTTPException(status_code=403, detail='Приём голосов второго тура уже закрыт')
+
+        cursor.execute(
+            'SELECT 1 FROM survey_tiebreak_candidates WHERE tiebreak_id = %s AND book_id = %s',
+            (tiebreak_id, data.book_id),
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=400, detail='Эта книга не участвует во втором туре')
+
+        cursor.execute(
+            '''
+            INSERT INTO survey_tiebreak_votes (tiebreak_id, member_id, book_id, updated_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (tiebreak_id, member_id)
+            DO UPDATE SET book_id = EXCLUDED.book_id, updated_at = now()
+            ''',
+            (tiebreak_id, member_id, data.book_id),
+        )
+
+        conn.commit()
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail='Не удалось сохранить голос')
+    finally:
+        conn.close()
 
 
 # --- Auth ---

@@ -1,6 +1,6 @@
 # bookclub-api
 
-REST API for a book club. Stores data in PostgreSQL (Supabase) and book cover images on local disk, served by this app under `/covers`.
+REST API for a book club. Stores data in a self-hosted PostgreSQL instance and book cover images on local disk, served by this app under `/covers`.
 
 Part of the [Book Club](https://github.com/stars/narangi-design/lists/book-club) project — also includes a [Telegram Bot](https://github.com/narangi-design/bookclub-chatbot) that uses this API for all bot commands, and a [Web Dashboard](https://github.com/narangi-design/bookclub-frontend) that reads club data through the public endpoints.
 
