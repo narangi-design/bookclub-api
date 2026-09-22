@@ -74,6 +74,27 @@ def find_or_create_member(cursor, telegram_id: int, telegram_username: str | Non
     return member_id
 
 
+def resolve_current_member_id(cursor, current_user: dict) -> int | None:
+    """Resolve the club member (if any) behind the current session.
+
+    Telegram sessions already carry the member id as their JWT subject.
+    Password sessions carry only a `users.username`, which by convention
+    matches the person's Telegram @username — so it's matched live against
+    members.telegram_username on every call rather than a cached FK, since
+    that column gets populated independently by bot activity (nominations,
+    votes) and may only show up well after the password account was created.
+    """
+    if current_user['auth_method'] == 'telegram':
+        return current_user['user_id']
+
+    cursor.execute(
+        'SELECT id FROM members WHERE lower(telegram_username) = lower(%s)',
+        (current_user['name'],),
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def verify_bot_secret(x_bot_secret: str | None = Header(default=None)):
     secret = os.getenv('BOT_SECRET', '')
     if not x_bot_secret or not hmac.compare_digest(x_bot_secret, secret):
@@ -982,7 +1003,19 @@ def telegram_login(data: TelegramLoginData):
 
 @app.get('/api/auth/me')
 def get_me(current_user: dict = Depends(get_current_user)):
-    return {'user_id': current_user['user_id'], 'name': current_user['name'], 'auth_method': current_user['auth_method']}
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        member_id = resolve_current_member_id(cursor, current_user)
+    finally:
+        conn.close()
+
+    return {
+        'user_id': current_user['user_id'],
+        'name': current_user['name'],
+        'auth_method': current_user['auth_method'],
+        'member_id': member_id,
+    }
 
 
 class UpdateAccountData(BaseModel):
