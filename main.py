@@ -689,13 +689,15 @@ def get_members(current_user: dict = Depends(get_current_user)):
 
 # --- Survey ("Книга года") ---
 
-def require_telegram_member(current_user: dict) -> int:
-    """Returns the member_id for a Telegram-authenticated user, or raises 403.
-    Password logins are dashboard-only and have no reliable mapping to a
-    members row, so the survey is Telegram-only."""
-    if current_user['auth_method'] != 'telegram':
-        raise HTTPException(status_code=403, detail='Опрос доступен только через вход по Telegram')
-    return current_user['user_id']
+def require_member(cursor, current_user: dict) -> int:
+    """Returns the member_id behind the current session (see
+    resolve_current_member_id), or raises 403 if it doesn't resolve to a
+    club member — covers both Telegram sessions and the password-login
+    fallback, matched live by username against members.telegram_username."""
+    member_id = resolve_current_member_id(cursor, current_user)
+    if member_id is None:
+        raise HTTPException(status_code=403, detail='Опрос доступен только участникам клуба')
+    return member_id
 
 
 @app.get('/api/survey/meta')
@@ -733,10 +735,10 @@ def get_survey_candidates():
 
 @app.get('/api/survey/response')
 def get_survey_response(current_user: dict = Depends(get_current_user)):
-    member_id = require_telegram_member(current_user)
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        member_id = require_member(cursor, current_user)
         cursor.execute(
             'SELECT id, books_read_count, open_text FROM survey_responses WHERE year = %s AND member_id = %s',
             (SURVEY_YEAR, member_id),
@@ -768,8 +770,6 @@ class SurveyResponseData(BaseModel):
 
 @app.put('/api/survey/response')
 def put_survey_response(data: SurveyResponseData, current_user: dict = Depends(get_current_user)):
-    member_id = require_telegram_member(current_user)
-
     if _survey_is_closed():
         raise HTTPException(status_code=403, detail='Приём ответов уже закрыт')
 
@@ -779,6 +779,7 @@ def put_survey_response(data: SurveyResponseData, current_user: dict = Depends(g
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        member_id = require_member(cursor, current_user)
         cursor.execute('SELECT book_id FROM survey_candidates WHERE year = %s', (SURVEY_YEAR,))
         candidate_ids = {r[0] for r in cursor.fetchall()}
         submitted_ids = set(favorite_ids) | set(least_favorite_ids)
@@ -866,10 +867,10 @@ def get_survey_tiebreaks():
 
 @app.get('/api/survey/tiebreaks/{category}/vote')
 def get_tiebreak_vote(category: str, current_user: dict = Depends(get_current_user)):
-    member_id = require_telegram_member(current_user)
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        member_id = require_member(cursor, current_user)
         cursor.execute(
             '''
             SELECT tv.book_id
@@ -890,11 +891,10 @@ class TiebreakVoteData(BaseModel):
 
 @app.put('/api/survey/tiebreaks/{category}/vote')
 def put_tiebreak_vote(category: str, data: TiebreakVoteData, current_user: dict = Depends(get_current_user)):
-    member_id = require_telegram_member(current_user)
-
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        member_id = require_member(cursor, current_user)
         cursor.execute(
             'SELECT id, deadline FROM survey_tiebreaks WHERE year = %s AND category = %s',
             (SURVEY_YEAR, category),
@@ -951,14 +951,14 @@ def login(data: LoginData):
             (data.username, hash_password(data.password))
         )
         user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=401, detail='Неверный логин или пароль')
+        member_id = resolve_current_member_id(cursor, {'auth_method': 'password', 'name': user[1]})
     finally:
         conn.close()
 
-    if not user:
-        raise HTTPException(status_code=401, detail='Неверный логин или пароль')
-
     token = create_access_token(user[0], user[1], 'password')
-    return {'access_token': token, 'token_type': 'bearer', 'user_id': user[0], 'name': user[1]}
+    return {'access_token': token, 'token_type': 'bearer', 'user_id': user[0], 'name': user[1], 'member_id': member_id}
 
 
 class TelegramLoginData(BaseModel):
@@ -999,7 +999,7 @@ def telegram_login(data: TelegramLoginData):
         conn.close()
 
     token = create_access_token(member_id, display_name, 'telegram')
-    return {'access_token': token, 'token_type': 'bearer', 'user_id': member_id, 'name': display_name}
+    return {'access_token': token, 'token_type': 'bearer', 'user_id': member_id, 'name': display_name, 'member_id': member_id}
 
 @app.get('/api/auth/me')
 def get_me(current_user: dict = Depends(get_current_user)):
@@ -1054,7 +1054,8 @@ def update_account(data: UpdateAccountData, current_user: dict = Depends(get_cur
 
         cursor.execute('SELECT id, username FROM users WHERE id = %s', (current_user['user_id'],))
         updated = cursor.fetchone()
-        return {'ok': True, 'user_id': updated[0], 'name': updated[1]}
+        member_id = resolve_current_member_id(cursor, {'auth_method': 'password', 'name': updated[1]})
+        return {'ok': True, 'user_id': updated[0], 'name': updated[1], 'member_id': member_id}
     except HTTPException:
         raise
     except Exception:
